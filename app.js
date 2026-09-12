@@ -435,7 +435,7 @@ function renderPayables() {
   const totalDue = sum(open, x => x.due), totalPaid = sum(all, x => x.paid), totalAmt = sum(all, x => x.p.amount);
   const byVendor = {}; for (const x of open) { byVendor[x.p.vendor] = (byVendor[x.p.vendor] || 0) + x.due; }
   const vendors = Object.entries(byVendor).sort((a, b) => b[1] - a[1]);
-  const list = (ui.showSettled ? all : open).sort((a, b) => (a.due > 0.005 ? 0 : 1) - (b.due > 0.005 ? 0 : 1) || (a.p.dueDate || '9999').localeCompare(b.p.dueDate || '9999') || b.ev.eventDate.localeCompare(a.ev.eventDate));
+  const list = (ui.showSettled ? all : open).sort((a, b) => (a.due > 0.005 ? 0 : 1) - (b.due > 0.005 ? 0 : 1) || (a.p.dueDate || '9999').localeCompare(b.p.dueDate || '9999') || (b.ev ? b.ev.eventDate : (b.p.createdOn || '')).localeCompare(a.ev ? a.ev.eventDate : (a.p.createdOn || '')));
   return `<section class="page">
     <div class="page-head"><h2>Payments to make</h2><div class="row-btns"><label class="toggle"><input type="checkbox" id="showSettled" ${ui.showSettled ? 'checked' : ''}> show settled</label><button class="btn primary" id="addPayableBtn">＋ Add payment to make</button></div></div>
     <p class="muted small">Workers & services from events, plus anything else you owe — personal debts, loans, bills.</p>
