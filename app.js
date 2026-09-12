@@ -4,6 +4,7 @@ const LS = { data: 'el.data', vault: 'el.vault', repo: 'el.repo', mode: 'el.mode
 const PAY_MODES = ['Cash', 'UPI', 'Bank transfer', 'Cheque', 'Card', 'Other'];
 const EXP_CATEGORIES = ['Decoration', 'Food & catering', 'Sound & lights', 'Transport', 'Venue', 'Materials', 'Printing', 'Photography', 'Staff', 'Rent', 'Misc'];
 const VENDOR_CATEGORIES = ['Worker / labour', 'Decorator', 'Caterer', 'Sound & DJ', 'Photographer', 'Developer', 'Transport', 'Supplier', 'Freelancer', 'Other'];
+const OTHER_CATEGORIES = ['Personal debt', 'Loan / EMI', 'Borrowed money', 'Rent', 'Bills', 'Salary', 'Purchase on credit', 'Other'];
 const STATUSES = ['upcoming', 'completed', 'cancelled'];
 
 let DB = null;
@@ -28,7 +29,7 @@ const opts = (list, sel) => list.map(o => `<option ${o === sel ? 'selected' : ''
 function toast(msg, kind = '') { const t = $('#toast'); t.textContent = msg; t.className = `toast ${kind}`; clearTimeout(t._t); t._t = setTimeout(() => t.classList.add('hidden'), 2600); }
 
 /* ---------- data model ---------- */
-function emptyDB() { return { version: 1, auth: null, settings: { businessName: 'Event Ledger', updatedAt: now() }, events: [], deleted: {} }; }
+function emptyDB() { return { version: 1, auth: null, settings: { businessName: 'Event Ledger', updatedAt: now() }, events: [], payables: [], deleted: {} }; }
 function newEvent(p = {}) {
   return { id: uid(), name: '', client: '', phone: '', eventDate: today(), venue: '', closedOn: today(), closedCost: 0, status: 'upcoming', notes: '', payments: [], expenses: [], payables: [], createdAt: now(), updatedAt: now(), ...p };
 }
@@ -48,8 +49,10 @@ function calc(ev) {
 function allPayables() {
   const out = [];
   for (const ev of DB.events) for (const p of ev.payables || []) { const paid = sum(p.payments); out.push({ ev, p, paid, due: num(p.amount) - paid }); }
+  for (const p of DB.payables || []) { const paid = sum(p.payments); out.push({ ev: null, p, paid, due: num(p.amount) - paid }); }
   return out;
 }
+function touchPayable(ev, p) { if (ev) touch(ev); else p.updatedAt = now(); }
 
 /* ---------- persistence ---------- */
 function loadLocal() { try { const j = JSON.parse(localStorage.getItem(LS.data)); return j && j.version ? j : null; } catch { return null; } }
@@ -71,6 +74,9 @@ function merge(remote, local) {
   const map = new Map();
   for (const e of [...(remote.events || []), ...(local.events || [])]) { const cur = map.get(e.id); if (!cur || (e.updatedAt || 0) > (cur.updatedAt || 0)) map.set(e.id, e); }
   out.events = [...map.values()].filter(e => !(out.deleted[e.id] && out.deleted[e.id] >= (e.updatedAt || 0)));
+  const pm = new Map();
+  for (const p of [...(remote.payables || []), ...(local.payables || [])]) { const cur = pm.get(p.id); if (!cur || (p.updatedAt || 0) > (cur.updatedAt || 0)) pm.set(p.id, p); }
+  out.payables = [...pm.values()].filter(p => !(out.deleted[p.id] && out.deleted[p.id] >= (p.updatedAt || 0)));
   return out;
 }
 
@@ -141,13 +147,14 @@ async function unlock(password, token, mode, repo, { quiet } = {}) {
     else { local = local || emptyDB(); local.auth = await Crypto.makeAuth(password); local.authUpdatedAt = now(); }
     DB = merge(remote, local) || emptyDB();
     if (!DB.auth) { DB.auth = await Crypto.makeAuth(password); DB.authUpdatedAt = now(); }
+    DB.payables = DB.payables || [];
     localStorage.setItem(LS.vault, JSON.stringify(await Crypto.seal(password, token)));
     localStorage.setItem(LS.repo, repo); localStorage.setItem(LS.mode, 'sync');
     session = { password, token, mode: 'sync' };
     saveLocal();
     try { if (JSON.stringify(DB) !== JSON.stringify(remote)) await GitSync.push(DB, merge); setSyncUI('synced'); } catch (e) { syncState.lastError = e.message; setSyncUI('error'); }
   } else {
-    if (local && local.auth) { if (!(await Crypto.verifyAuth(password, local.auth))) throw new Error('Wrong password'); DB = local; }
+    if (local && local.auth) { if (!(await Crypto.verifyAuth(password, local.auth))) throw new Error('Wrong password'); DB = local; DB.payables = DB.payables || []; }
     else { DB = local || emptyDB(); DB.auth = await Crypto.makeAuth(password); DB.authUpdatedAt = now(); }
     localStorage.setItem(LS.mode, 'local');
     session = { password, token: null, mode: 'local' };
@@ -227,8 +234,10 @@ function renderDashboard() {
   const evs = periodFilter(DB.events.filter(e => e.status !== 'cancelled'));
   const tot = evs.reduce((a, e) => { const c = calc(e); for (const k in c) a[k] = (a[k] || 0) + c[k]; return a; }, {});
   const collectList = evs.filter(e => calc(e).toCollect > 0.005).sort((a, b) => a.eventDate.localeCompare(b.eventDate));
-  const payList = allPayables().filter(x => x.due > 0.005 && evs.includes(x.ev)).sort((a, b) => (a.p.dueDate || '9999').localeCompare(b.p.dueDate || '9999'));
+  const payList = allPayables().filter(x => x.due > 0.005 && (x.ev === null || evs.includes(x.ev))).sort((a, b) => (a.p.dueDate || '9999').localeCompare(b.p.dueDate || '9999'));
   const upcoming = DB.events.filter(e => e.status === 'upcoming' && daysUntil(e.eventDate) >= 0).sort((a, b) => a.eventDate.localeCompare(b.eventDate)).slice(0, 6);
+  const otherDue = sum(allPayables().filter(x => x.ev === null), x => Math.max(0, x.due));
+  const totalNeedToPay = (tot.payablesDue || 0) + otherDue;
   const profitRows = evs.map(e => ({ e, c: calc(e) })).sort((a, b) => b.c.billed - a.c.billed).slice(0, 8);
   const maxBilled = Math.max(1, ...profitRows.map(r => r.c.billed));
   return `
@@ -243,7 +252,7 @@ function renderDashboard() {
       ${statCard('Total billed', tot.billed, 'blue')}
       ${statCard('Received', tot.received, 'green', `${tot.billed ? Math.round(tot.received / tot.billed * 100) : 0}% of billed`)}
       ${statCard('Need to receive', tot.toCollect, tot.toCollect > 0 ? 'amber' : 'green', `${collectList.length} event${collectList.length === 1 ? '' : 's'} pending`)}
-      ${statCard('Need to pay', tot.payablesDue, tot.payablesDue > 0 ? 'red' : 'green', `${payList.length} payable${payList.length === 1 ? '' : 's'} open`)}
+      ${statCard('Need to pay', totalNeedToPay, totalNeedToPay > 0 ? 'red' : 'green', `events ${money(tot.payablesDue)} · other/personal ${money(otherDue)}`)}
       ${statCard('Total expenses', tot.totalCost, '', `direct ${money(tot.expenses)} + vendors ${money(tot.payablesTotal)}`)}
       ${statCard('Paid out so far', tot.expenses + tot.payablesPaid, '', `direct ${money(tot.expenses)} + vendors ${money(tot.payablesPaid)}`)}
       ${statCard('Expected profit', tot.profit, tot.profit >= 0 ? 'green' : 'red', `${tot.billed ? Math.round(tot.profit / tot.billed * 100) : 0}% margin`)}
@@ -256,8 +265,8 @@ function renderDashboard() {
         ${collectList.length ? `<ul class="list">${collectList.slice(0, 8).map(e => { const c = calc(e); return `<li class="row" data-open="${e.id}"><div><b>${esc(e.name)}</b><div class="muted small">${esc(e.client)} · ${fmtDate(e.eventDate)}</div></div><div class="right"><b class="amber">${money(c.toCollect)}</b><div class="muted small">of ${money(c.billed)}</div></div></li>`; }).join('')}</ul>${collectList.length > 8 ? `<button class="btn link" data-go="collect">See all ${collectList.length} →</button>` : ''}` : '<p class="muted">All collected 🎉</p>'}
       </div>
       <div class="card">
-        <h3>💸 Need to pay <span class="pill">${money(tot.payablesDue)}</span></h3>
-        ${payList.length ? `<ul class="list">${payList.slice(0, 8).map(x => `<li class="row" data-open="${x.ev.id}"><div><b>${esc(x.p.vendor)}</b><div class="muted small">${esc(x.p.desc || x.p.category || '')} · ${esc(x.ev.name)}${x.p.dueDate ? ` · due ${fmtDate(x.p.dueDate)}` : ''}</div></div><div class="right"><b class="red">${money(x.due)}</b><div class="muted small">of ${money(x.p.amount)}</div></div></li>`).join('')}</ul>${payList.length > 8 ? `<button class="btn link" data-go="payables">See all ${payList.length} →</button>` : ''}` : '<p class="muted">Nothing pending 🎉</p>'}
+        <h3>💸 Need to pay <span class="pill">${money(totalNeedToPay)}</span></h3>
+        ${payList.length ? `<ul class="list">${payList.slice(0, 8).map(x => `<li class="row" ${x.ev ? `data-open="${x.ev.id}"` : 'data-go="payables"'}><div><b>${esc(x.p.vendor)}</b><div class="muted small">${esc(x.p.desc || x.p.category || '')} · ${x.ev ? esc(x.ev.name) : '<i>personal / other</i>'}${x.p.dueDate ? ` · due ${fmtDate(x.p.dueDate)}` : ''}</div></div><div class="right"><b class="red">${money(x.due)}</b><div class="muted small">of ${money(x.p.amount)}</div></div></li>`).join('')}</ul>${payList.length > 8 ? `<button class="btn link" data-go="payables">See all ${payList.length} →</button>` : ''}` : '<p class="muted">Nothing pending 🎉</p>'}
       </div>
       <div class="card">
         <h3>📅 Upcoming events</h3>
@@ -380,10 +389,10 @@ function renderEventDetail() {
 function payableBlock(e, p, { showEvent } = {}) {
   const paid = sum(p.payments), due = num(p.amount) - paid; const settled = due <= 0.005;
   const rows = (p.payments || []).slice().sort((a, b) => b.date.localeCompare(a.date));
-  return `<div class="payable ${settled ? 'settled' : ''}" data-pid="${p.id}" data-eid="${e.id}">
+  return `<div class="payable ${settled ? 'settled' : ''}" data-pid="${p.id}" data-eid="${e ? e.id : ''}">
     <div class="pb-head">
       <div><b>${esc(p.vendor)}</b> <span class="muted small">${esc(p.category || '')}${p.desc ? ' · ' + esc(p.desc) : ''}</span>
-        ${showEvent ? `<div class="muted small">🎪 <a href="#" data-open="${e.id}">${esc(e.name)}</a> · ${fmtDate(e.eventDate)}</div>` : ''}
+        ${showEvent ? (e ? `<div class="muted small">🎪 <a href="#" data-open="${e.id}">${esc(e.name)}</a> · ${fmtDate(e.eventDate)}</div>` : `<div class="muted small">👤 Personal / other · added ${fmtDate(p.createdOn || '')}</div>`) : ''}
         ${p.dueDate ? `<div class="muted small">Due ${fmtDate(p.dueDate)}${!settled && daysUntil(p.dueDate) < 0 ? ' <span class="red">· overdue</span>' : ''}</div>` : ''}</div>
       <div class="right"><div class="${settled ? 'green' : 'red'}"><b>${settled ? 'Settled ✓' : money(due) + ' due'}</b></div><div class="muted small">paid ${money(paid)} of ${money(p.amount)}</div></div>
     </div>
@@ -413,15 +422,16 @@ function renderPayables() {
   const vendors = Object.entries(byVendor).sort((a, b) => b[1] - a[1]);
   const list = (ui.showSettled ? all : open).sort((a, b) => (a.due > 0.005 ? 0 : 1) - (b.due > 0.005 ? 0 : 1) || (a.p.dueDate || '9999').localeCompare(b.p.dueDate || '9999') || b.ev.eventDate.localeCompare(a.ev.eventDate));
   return `<section class="page">
-    <div class="page-head"><h2>Payments to make</h2><label class="toggle"><input type="checkbox" id="showSettled" ${ui.showSettled ? 'checked' : ''}> show settled</label></div>
+    <div class="page-head"><h2>Payments to make</h2><div class="row-btns"><label class="toggle"><input type="checkbox" id="showSettled" ${ui.showSettled ? 'checked' : ''}> show settled</label><button class="btn primary" id="addPayableBtn">＋ Add payment to make</button></div></div>
+    <p class="muted small">Workers & services from events, plus anything else you owe — personal debts, loans, bills.</p>
     <div class="stats compact">
-      ${statCard('Total to pay now', totalDue, totalDue > 0 ? 'red' : 'green', `${open.length} open item${open.length === 1 ? '' : 's'}`)}
+      ${statCard('Total to pay now', totalDue, totalDue > 0 ? 'red' : 'green', `events ${money(sum(open.filter(x => x.ev), x => x.due))} · other ${money(sum(open.filter(x => !x.ev), x => x.due))}`)}
       ${statCard('Paid to vendors so far', totalPaid, 'green')}
       ${statCard('Total committed', totalAmt, 'blue')}
     </div>
     ${vendors.length ? `<div class="card"><h3>By person / service</h3><div class="vendor-chips">${vendors.map(([v, d]) => `<span class="vchip"><b>${esc(v)}</b> ${money(d)}</span>`).join('')}</div></div>` : ''}
     <div class="card">
-      ${list.length ? list.map(x => payableBlock(x.ev, x.p, { showEvent: true })).join('') : '<p class="muted">Nothing to pay 🎉 Add workers/services inside an event.</p>'}
+      ${list.length ? list.map(x => payableBlock(x.ev, x.p, { showEvent: true })).join('') : '<p class="muted">Nothing to pay 🎉 Use ＋ Add payment to make, or add workers/services inside an event.</p>'}
     </div>
   </section>`;
 }
@@ -499,12 +509,35 @@ function openEventForm(ev) {
 function openVendorForm(e, p) {
   openModal(`<form id="vendorEdit" class="form"><h3>Edit worker / service</h3><div class="form-grid">
     <label>Name*<input name="vendor" value="${esc(p.vendor)}" required></label>
-    <label>Category<select name="category">${opts(VENDOR_CATEGORIES, p.category)}</select></label>
+    <label>Category<select name="category">${opts(e ? VENDOR_CATEGORIES : OTHER_CATEGORIES, p.category)}</select></label>
     <label class="span2">For what<input name="desc" value="${esc(p.desc)}"></label>
     <label>Agreed amount (₹)*<input type="number" step="any" min="0" name="amount" value="${p.amount}" required></label>
     <label>Due date<input type="date" name="dueDate" value="${esc(p.dueDate || '')}"></label></div>
     <div class="row-btns"><button class="btn primary">Save</button><button type="button" class="btn" data-close>Cancel</button></div></form>`);
-  $('#vendorEdit').addEventListener('submit', (x) => { x.preventDefault(); const f = new FormData(x.target); p.vendor = f.get('vendor').trim(); p.category = f.get('category'); p.desc = f.get('desc').trim(); p.amount = num(f.get('amount')); p.dueDate = f.get('dueDate') || ''; touch(e); closeModal(); save(); toast('Saved'); });
+  $('#vendorEdit').addEventListener('submit', (x) => { x.preventDefault(); const f = new FormData(x.target); p.vendor = f.get('vendor').trim(); p.category = f.get('category'); p.desc = f.get('desc').trim(); p.amount = num(f.get('amount')); p.dueDate = f.get('dueDate') || ''; touchPayable(e, p); closeModal(); save(); toast('Saved'); });
+}
+function openNewPayableForm() {
+  const evOpts = DB.events.filter(e => e.status !== 'cancelled').sort((a, b) => b.eventDate.localeCompare(a.eventDate)).map(e => `<option value="${e.id}">${esc(e.name)} · ${esc(e.client)}</option>`).join('');
+  openModal(`<form id="newPayable" class="form"><h3>Add a payment to make</h3><div class="form-grid">
+    <label class="span2">Link to event<select name="event"><option value="">— None (personal / other debt) —</option>${evOpts}</select></label>
+    <label>To whom*<input name="vendor" required placeholder="Person, shop, bank…" list="vendorList2"><datalist id="vendorList2">${[...new Set(allPayables().map(x => x.p.vendor))].map(v => `<option value="${esc(v)}">`).join('')}</datalist></label>
+    <label>Category<select name="category">${opts(OTHER_CATEGORIES, 'Personal debt')}</select></label>
+    <label class="span2">For what<input name="desc" placeholder="e.g. borrowed for bike repair"></label>
+    <label>Total amount (₹)*<input type="number" step="any" min="0" name="amount" required></label>
+    <label>Already paid (₹)<input type="number" step="any" min="0" name="paid" placeholder="0"></label>
+    <label>Due date<input type="date" name="dueDate"></label>
+    <label>Added on<input type="date" name="createdOn" value="${today()}"></label></div>
+    <div class="row-btns"><button class="btn primary">Add</button><button type="button" class="btn" data-close>Cancel</button></div></form>`);
+  const catSel = $('#newPayable [name=category]');
+  $('#newPayable [name=event]').addEventListener('change', (x) => { catSel.innerHTML = opts(x.target.value ? VENDOR_CATEGORIES : OTHER_CATEGORIES, x.target.value ? 'Worker / labour' : 'Personal debt'); });
+  $('#newPayable').addEventListener('submit', (x) => {
+    x.preventDefault(); const f = new FormData(x.target);
+    const p = { id: uid(), vendor: f.get('vendor').trim(), desc: f.get('desc').trim(), category: f.get('category'), amount: num(f.get('amount')), dueDate: f.get('dueDate') || '', createdOn: f.get('createdOn') || today(), payments: [] };
+    const paid = num(f.get('paid')); if (paid > 0) p.payments.push({ id: uid(), date: p.createdOn, amount: paid, mode: 'Cash', note: 'Already paid' });
+    const ev = f.get('event') ? getEvent(f.get('event')) : null;
+    if (ev) { ev.payables.push(p); touch(ev); } else { p.updatedAt = now(); DB.payables.push(p); }
+    closeModal(); save(); toast(ev ? `Added to ${ev.name}` : 'Added to your payments');
+  });
 }
 
 function clientStatement(e) {
@@ -552,13 +585,14 @@ function bindMain() {
   }
 
   // payable actions (event detail + payables tab)
-  const findPayable = (pid) => { for (const ev of DB.events) { const p = (ev.payables || []).find(p => p.id === pid); if (p) return { ev, p }; } return null; };
-  $$('[data-payfull]', main).forEach(b => b.addEventListener('click', () => { const { ev, p } = findPayable(b.dataset.payfull); const due = num(p.amount) - sum(p.payments); if (confirm(`Record full payment of ${money(due)} to ${p.vendor}?`)) { p.payments.push({ id: uid(), date: today(), amount: due, mode: 'Cash', note: 'Full settlement' }); touch(ev); save(); toast(`Paid ${p.vendor} in full`); } }));
+  const findPayable = (pid) => { for (const ev of DB.events) { const p = (ev.payables || []).find(p => p.id === pid); if (p) return { ev, p }; } const p = (DB.payables || []).find(p => p.id === pid); return p ? { ev: null, p } : null; };
+  $('#addPayableBtn')?.addEventListener('click', openNewPayableForm);
+  $$('[data-payfull]', main).forEach(b => b.addEventListener('click', () => { const { ev, p } = findPayable(b.dataset.payfull); const due = num(p.amount) - sum(p.payments); if (confirm(`Record full payment of ${money(due)} to ${p.vendor}?`)) { p.payments.push({ id: uid(), date: today(), amount: due, mode: 'Cash', note: 'Full settlement' }); touchPayable(ev, p); save(); toast(`Paid ${p.vendor} in full`); } }));
   $$('[data-paypart]', main).forEach(b => b.addEventListener('click', () => { const f = $(`[data-payform="${b.dataset.paypart}"]`, main); f.classList.toggle('hidden'); if (!f.classList.contains('hidden')) f.querySelector('[name=amount]').focus(); }));
-  $$('[data-payform]', main).forEach(f => f.addEventListener('submit', (x) => { x.preventDefault(); const { ev, p } = findPayable(f.dataset.payform); const fd = new FormData(f); const amt = num(fd.get('amount')); if (amt <= 0) return; p.payments.push({ id: uid(), date: fd.get('date'), amount: amt, mode: fd.get('mode'), note: String(fd.get('note')).trim() }); touch(ev); save(); toast(`Recorded ${money(amt)} to ${p.vendor}`); }));
+  $$('[data-payform]', main).forEach(f => f.addEventListener('submit', (x) => { x.preventDefault(); const { ev, p } = findPayable(f.dataset.payform); const fd = new FormData(f); const amt = num(fd.get('amount')); if (amt <= 0) return; p.payments.push({ id: uid(), date: fd.get('date'), amount: amt, mode: fd.get('mode'), note: String(fd.get('note')).trim() }); touchPayable(ev, p); save(); toast(`Recorded ${money(amt)} to ${p.vendor}`); }));
   $$('[data-editvendor]', main).forEach(b => b.addEventListener('click', () => { const { ev, p } = findPayable(b.dataset.editvendor); openVendorForm(ev, p); }));
-  $$('[data-delvendor]', main).forEach(b => b.addEventListener('click', () => { const { ev, p } = findPayable(b.dataset.delvendor); if (confirm(`Remove ${p.vendor} (${money(p.amount)}) from this event?`)) { ev.payables = ev.payables.filter(x => x.id !== p.id); touch(ev); save(); } }));
-  $$('[data-del-vpay]', main).forEach(b => b.addEventListener('click', () => { const [pid, rid] = b.dataset.delVpay.split(':'); const { ev, p } = findPayable(pid); if (confirm('Delete this payment record?')) { p.payments = p.payments.filter(r => r.id !== rid); touch(ev); save(); } }));
+  $$('[data-delvendor]', main).forEach(b => b.addEventListener('click', () => { const { ev, p } = findPayable(b.dataset.delvendor); if (confirm(`Remove ${p.vendor} (${money(p.amount)})?`)) { if (ev) { ev.payables = ev.payables.filter(x => x.id !== p.id); touch(ev); } else { DB.deleted[p.id] = now(); DB.payables = DB.payables.filter(x => x.id !== p.id); } save(); } }));
+  $$('[data-del-vpay]', main).forEach(b => b.addEventListener('click', () => { const [pid, rid] = b.dataset.delVpay.split(':'); const { ev, p } = findPayable(pid); if (confirm('Delete this payment record?')) { p.payments = p.payments.filter(r => r.id !== rid); touchPayable(ev, p); save(); } }));
 
   // collect tab
   $$('[data-recvfull]', main).forEach(b => b.addEventListener('click', () => { const ev = getEvent(b.dataset.recvfull); const c = calc(ev); if (confirm(`Record ${money(c.toCollect)} received from ${ev.client}?`)) { ev.payments.push({ id: uid(), date: today(), amount: c.toCollect, mode: 'UPI', note: 'Final payment' }); touch(ev); save(); toast('Recorded'); } }));
@@ -594,9 +628,9 @@ function bindMain() {
   $('#importBtn')?.addEventListener('click', () => $('#importFile').click());
   $('#importFile')?.addEventListener('change', async (x) => {
     const file = x.target.files[0]; if (!file) return;
-    try { const j = JSON.parse(await file.text()); if (!Array.isArray(j.events)) throw new Error('Not a ledger file'); const mode = confirm(`Import ${j.events.length} events.\n\nOK = merge into current data\nCancel = replace everything`) ? 'merge' : 'replace'; const { auth, authUpdatedAt } = DB; if (mode === 'merge') DB = merge(DB, { ...j, auth: null }); else DB = { ...emptyDB(), ...j }; DB.auth = auth; DB.authUpdatedAt = authUpdatedAt; DB.events.forEach(e => touch(e)); save({ immediate: true }); toast('Imported'); } catch (ex) { alert('Import failed: ' + ex.message); }
+    try { const j = JSON.parse(await file.text()); if (!Array.isArray(j.events)) throw new Error('Not a ledger file'); const mode = confirm(`Import ${j.events.length} events.\n\nOK = merge into current data\nCancel = replace everything`) ? 'merge' : 'replace'; const { auth, authUpdatedAt } = DB; if (mode === 'merge') DB = merge(DB, { ...j, auth: null }); else DB = { ...emptyDB(), ...j }; DB.auth = auth; DB.authUpdatedAt = authUpdatedAt; DB.payables = DB.payables || []; DB.events.forEach(e => touch(e)); DB.payables.forEach(p => p.updatedAt = now()); save({ immediate: true }); toast('Imported'); } catch (ex) { alert('Import failed: ' + ex.message); }
   });
-  $('#wipeBtn')?.addEventListener('click', () => { if (prompt('Type DELETE to remove all events') === 'DELETE') { DB.events.forEach(e => DB.deleted[e.id] = now()); DB.events = []; save({ immediate: true }); toast('All events deleted'); } });
+  $('#wipeBtn')?.addEventListener('click', () => { if (prompt('Type DELETE to remove all events') === 'DELETE') { DB.events.forEach(e => DB.deleted[e.id] = now()); DB.events = []; (DB.payables || []).forEach(p => DB.deleted[p.id] = now()); DB.payables = []; save({ immediate: true }); toast('All events deleted'); } });
   $('#resetDeviceBtn')?.addEventListener('click', () => { if (confirm('Sign out and remove ledger data from this device? Your GitHub copy stays.')) { Object.values(LS).forEach(k => localStorage.removeItem(k)); sessionStorage.clear(); location.reload(); } });
 }
 function download(name, content, type) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([content], { type })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }
