@@ -59,7 +59,7 @@ function loadLocal() { try { const j = JSON.parse(localStorage.getItem(LS.data))
 function saveLocal() { localStorage.setItem(LS.data, JSON.stringify(DB)); }
 function save(opts = {}) {
   saveLocal();
-  if (session.mode === 'sync') { syncState.dirty = true; setSyncUI('pending'); clearTimeout(syncState.timer); syncState.timer = setTimeout(syncNow, opts.immediate ? 0 : 1200); }
+  if (session.mode === 'sync') { syncState.dirty = true; syncState.gen = (syncState.gen || 0) + 1; setSyncUI('pending'); clearTimeout(syncState.timer); syncState.timer = setTimeout(syncNow, opts.immediate ? 0 : 1200); }
   if (!opts.silent) render();
 }
 
@@ -72,29 +72,44 @@ function merge(remote, local) {
   out.deleted = { ...(remote.deleted || {}), ...(local.deleted || {}) };
   for (const k of Object.keys(out.deleted)) out.deleted[k] = Math.max(remote.deleted?.[k] || 0, local.deleted?.[k] || 0);
   const map = new Map();
-  for (const e of [...(remote.events || []), ...(local.events || [])]) { const cur = map.get(e.id); if (!cur || (e.updatedAt || 0) > (cur.updatedAt || 0)) map.set(e.id, e); }
+  for (const e of [...(remote.events || []), ...(local.events || [])]) { const cur = map.get(e.id); if (!cur || (e.updatedAt || 0) >= (cur.updatedAt || 0)) map.set(e.id, e); }
   out.events = [...map.values()].filter(e => !(out.deleted[e.id] && out.deleted[e.id] >= (e.updatedAt || 0)));
   const pm = new Map();
-  for (const p of [...(remote.payables || []), ...(local.payables || [])]) { const cur = pm.get(p.id); if (!cur || (p.updatedAt || 0) > (cur.updatedAt || 0)) pm.set(p.id, p); }
+  for (const p of [...(remote.payables || []), ...(local.payables || [])]) { const cur = pm.get(p.id); if (!cur || (p.updatedAt || 0) >= (cur.updatedAt || 0)) pm.set(p.id, p); }
   out.payables = [...pm.values()].filter(p => !(out.deleted[p.id] && out.deleted[p.id] >= (p.updatedAt || 0)));
   return out;
 }
 
+// Canonical JSON (sorted keys) so key order from a GitHub round-trip never counts as a change.
+function canon(o) { return JSON.stringify(o, (k, v) => (v && typeof v === 'object' && !Array.isArray(v)) ? Object.keys(v).sort().reduce((a, kk) => (a[kk] = v[kk], a), {}) : v); }
 async function syncNow() {
-  if (session.mode !== 'sync' || syncState.busy || !GitSync.ready()) return;
+  if (session.mode !== 'sync' || !GitSync.ready()) return;
+  if (syncState.busy) { syncState.rerun = true; return; }
   syncState.busy = true; setSyncUI('syncing');
+  const gen = syncState.gen || 0;
   try {
-    const before = JSON.stringify(DB);
     const { data: remote } = await GitSync.pull();
-    DB = merge(remote, DB);
-    saveLocal();
-    if (JSON.stringify(DB) !== JSON.stringify(remote)) await GitSync.push(DB, merge);
-    syncState.dirty = false; syncState.lastError = null; setSyncUI('synced');
-    if (JSON.stringify(DB) !== before) render();
+    const merged = merge(remote, DB);
+    const localChanged = canon(merged) !== canon(DB);   // remote had something newer than us
+    if (localChanged) { DB = merged; saveLocal(); }
+    if (!remote || canon(DB) !== canon(remote)) await GitSync.push(DB, merge);
+    if ((syncState.gen || 0) === gen) syncState.dirty = false;
+    syncState.lastError = null; setSyncUI(syncState.dirty ? 'pending' : 'synced');
+    if (localChanged) safeRender();
   } catch (e) {
     syncState.lastError = e.message; setSyncUI('error'); console.warn('sync failed', e);
-  } finally { syncState.busy = false; }
+  } finally {
+    syncState.busy = false;
+    if (syncState.rerun || syncState.dirty) { syncState.rerun = false; clearTimeout(syncState.timer); syncState.timer = setTimeout(syncNow, 800); }
+  }
 }
+// Re-render only when the user is not in the middle of typing into a form.
+function safeRender() {
+  const a = document.activeElement;
+  if (a && $('#main').contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) { ui.pendingRender = true; return; }
+  ui.pendingRender = false; render();
+}
+document.addEventListener('focusout', () => { if (ui.pendingRender) setTimeout(() => { if (ui.pendingRender) safeRender(); }, 150); });
 function setSyncUI(s) {
   syncState.status = s; const b = $('#syncBtn'); if (!b) return;
   b.dataset.state = s;
@@ -569,19 +584,19 @@ function bindMain() {
   $('#showSettled')?.addEventListener('change', (x) => { ui.showSettled = x.target.checked; render(); });
 
   // event detail
-  const e = ui.tab === 'event' ? getEvent(ui.eventId) : null;
-  if (e) {
-    $('#statusSel').addEventListener('change', (x) => { e.status = x.target.value; touch(e); save(); toast(`Marked ${e.status}`); });
-    $('#editEventBtn').addEventListener('click', () => openEventForm(e));
-    $('#stmtBtn').addEventListener('click', () => shareText(clientStatement(e)));
-    $('#deleteEventBtn').addEventListener('click', () => { if (confirm(`Delete "${e.name}" and all its payments/expenses?`)) { DB.deleted[e.id] = now(); DB.events = DB.events.filter(x => x.id !== e.id); save({ silent: true }); go('events'); toast('Deleted'); } });
-    $('#payForm').addEventListener('submit', (x) => { x.preventDefault(); const f = new FormData(x.target); e.payments.push({ id: uid(), date: f.get('date'), amount: num(f.get('amount')), mode: f.get('mode'), note: String(f.get('note')).trim() }); touch(e); save(); toast('Payment added'); });
-    $$('[data-fill="pay"]').forEach(b => b.addEventListener('click', () => { const i = $('#payForm [name=amount]'); i.value = b.dataset.amt; i.focus(); }));
-    $('#expForm').addEventListener('submit', (x) => { x.preventDefault(); const f = new FormData(x.target); e.expenses.push({ id: uid(), date: f.get('date'), desc: String(f.get('desc')).trim(), amount: num(f.get('amount')), category: f.get('category') }); touch(e); save(); toast('Expense added'); });
-    $('#vendorForm').addEventListener('submit', (x) => { x.preventDefault(); const f = new FormData(x.target); e.payables.push({ id: uid(), vendor: String(f.get('vendor')).trim(), desc: String(f.get('desc')).trim(), category: f.get('category'), amount: num(f.get('amount')), dueDate: f.get('dueDate') || '', payments: [] }); touch(e); save(); toast('Added to payables'); });
-    $$('[data-del-pay]').forEach(b => b.addEventListener('click', () => { if (confirm('Delete this payment?')) { e.payments = e.payments.filter(p => p.id !== b.dataset.delPay); touch(e); save(); } }));
-    $$('[data-del-exp]').forEach(b => b.addEventListener('click', () => { if (confirm('Delete this expense?')) { e.expenses = e.expenses.filter(p => p.id !== b.dataset.delExp); touch(e); save(); } }));
-    $('#notesBox').addEventListener('change', (x) => { e.notes = x.target.value; touch(e); save({ silent: true }); toast('Notes saved'); });
+  const E = () => getEvent(ui.eventId);
+  if (ui.tab === 'event' && E()) {
+    $('#statusSel').addEventListener('change', (x) => { const e = E(); if (!e) return; e.status = x.target.value; touch(e); save(); toast(`Marked ${e.status}`); });
+    $('#editEventBtn').addEventListener('click', () => openEventForm(E()));
+    $('#stmtBtn').addEventListener('click', () => shareText(clientStatement(E())));
+    $('#deleteEventBtn').addEventListener('click', () => { const e = E(); if (!e) return; if (confirm(`Delete "${e.name}" and all its payments/expenses?`)) { DB.deleted[e.id] = now(); DB.events = DB.events.filter(x => x.id !== e.id); save({ silent: true }); go('events'); toast('Deleted'); } });
+    $('#payForm').addEventListener('submit', (x) => { x.preventDefault(); const e = E(); if (!e) return; const f = new FormData(x.target); e.payments.push({ id: uid(), date: f.get('date'), amount: num(f.get('amount')), mode: f.get('mode'), note: String(f.get('note')).trim() }); touch(e); save(); toast('Payment added'); });
+    $$('[data-fill="pay"]').forEach(b => b.addEventListener('click', () => { const e = E(); if (!e) return; const i = $('#payForm [name=amount]'); i.value = b.dataset.amt; i.focus(); }));
+    $('#expForm').addEventListener('submit', (x) => { x.preventDefault(); const e = E(); if (!e) return; const f = new FormData(x.target); e.expenses.push({ id: uid(), date: f.get('date'), desc: String(f.get('desc')).trim(), amount: num(f.get('amount')), category: f.get('category') }); touch(e); save(); toast('Expense added'); });
+    $('#vendorForm').addEventListener('submit', (x) => { x.preventDefault(); const e = E(); if (!e) return; const f = new FormData(x.target); e.payables.push({ id: uid(), vendor: String(f.get('vendor')).trim(), desc: String(f.get('desc')).trim(), category: f.get('category'), amount: num(f.get('amount')), dueDate: f.get('dueDate') || '', payments: [] }); touch(e); save(); toast('Added to payables'); });
+    $$('[data-del-pay]').forEach(b => b.addEventListener('click', () => { const e = E(); if (!e) return; if (confirm('Delete this payment?')) { e.payments = e.payments.filter(p => p.id !== b.dataset.delPay); touch(e); save(); } }));
+    $$('[data-del-exp]').forEach(b => b.addEventListener('click', () => { const e = E(); if (!e) return; if (confirm('Delete this expense?')) { e.expenses = e.expenses.filter(p => p.id !== b.dataset.delExp); touch(e); save(); } }));
+    $('#notesBox').addEventListener('change', (x) => { const e = E(); if (!e) return; e.notes = x.target.value; touch(e); save({ silent: true }); toast('Notes saved'); });
   }
 
   // payable actions (event detail + payables tab)
