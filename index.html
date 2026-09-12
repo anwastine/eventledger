@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<title>Event Ledger</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230ea5e9'/%3E%3Ctext x='32' y='44' font-size='34' text-anchor='middle' font-family='Arial' font-weight='700' fill='white'%3E₹%3C/text%3E%3C/svg%3E">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- ============ AUTH SCREENS ============ -->
+<div id="auth" class="auth hidden">
+  <div class="auth-card">
+    <div class="brand"><span class="brand-mark">₹</span><div><h1>Event Ledger</h1><p>Clients · Payments · Expenses · Payables</p></div></div>
+
+    <form id="loginForm" class="auth-form hidden" autocomplete="off">
+      <label>Password<input type="password" id="loginPassword" required autocomplete="current-password" inputmode="text"></label>
+      <div id="loginTokenWrap" class="hidden">
+        <label>GitHub token <span class="muted">(needed once on a new device)</span><input type="password" id="loginToken" autocomplete="off" placeholder="github_pat_…"></label>
+        <p class="hint">Data repo: <code id="loginRepoLabel"></code> · <a href="#" id="loginChangeRepo">change</a></p>
+      </div>
+      <button type="submit" class="btn primary block">Unlock</button>
+      <p class="auth-error" id="loginError"></p>
+      <p class="hint center"><a href="#" id="linkLocalOnly">Use this device only (no sync)</a> · <a href="#" id="linkResetDevice">Reset this device</a></p>
+    </form>
+
+    <form id="setupForm" class="auth-form hidden" autocomplete="off">
+      <h2>First-time setup</h2>
+      <label>Choose a password<input type="password" id="setupPassword" required minlength="4" autocomplete="new-password"></label>
+      <label>Repeat password<input type="password" id="setupPassword2" required minlength="4" autocomplete="new-password"></label>
+      <details id="setupSyncDetails" open>
+        <summary>Cross-device sync via private GitHub repo (recommended)</summary>
+        <label>Data repo <input type="text" id="setupRepo" placeholder="owner/repo"></label>
+        <label>GitHub fine-grained token<input type="password" id="setupToken" autocomplete="off" placeholder="github_pat_…"></label>
+        <p class="hint">Token needs <b>Contents: Read and write</b> on the data repo only. Leave blank to keep data on this device only.</p>
+      </details>
+      <button type="submit" class="btn primary block">Create ledger</button>
+      <p class="auth-error" id="setupError"></p>
+    </form>
+  </div>
+</div>
+
+<!-- ============ APP ============ -->
+<div id="app" class="app hidden">
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="brand-mark small">₹</span>
+      <strong id="bizName">Event Ledger</strong>
+    </div>
+    <div class="topbar-right">
+      <button id="syncBtn" class="sync" title="Sync now"><span class="dot"></span><span id="syncLabel">Local</span></button>
+      <button id="lockBtn" class="icon-btn" title="Lock">🔒</button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button data-tab="dashboard" class="tab active">📊<span>Dashboard</span></button>
+    <button data-tab="events" class="tab">🎪<span>Events</span></button>
+    <button data-tab="payables" class="tab">💸<span>To Pay</span><em id="payablesBadge" class="badge hidden"></em></button>
+    <button data-tab="collect" class="tab">💰<span>To Collect</span><em id="collectBadge" class="badge hidden"></em></button>
+    <button data-tab="settings" class="tab">⚙️<span>Settings</span></button>
+  </nav>
+
+  <main id="main"></main>
+
+  <button id="fab" class="fab" title="Add event">＋</button>
+</div>
+
+<!-- ============ MODAL ============ -->
+<div id="modal" class="modal hidden"><div class="modal-card" id="modalCard"></div></div>
+<div id="toast" class="toast hidden"></div>
+
+<script src="crypto.js"></script>
+<script src="sync.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
